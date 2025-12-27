@@ -53,6 +53,9 @@ async def calculate_occupancy_ratio(park_id: str, target_time: datetime):
     
     FEATURES = ["hour", "dayofweek", "is_weekend", "is_holiday", "park_id_encoded", 
                 "max_capacity", "temperature", "precipitation", "wind_speed", "pressure"]
+    #test kodu
+    # if target_time.hour >= 18:
+    #      return 0.99
 
     ratio = float(model.predict(df_input[FEATURES])[0])
     return max(0.0, min(1.0, ratio))
@@ -85,11 +88,19 @@ app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], all
 @app.post("/predict")
 async def predict_occupancy(request: PredictionRequest):
     try:
-        target_time = datetime.fromiso8601(request.prediction_time)
+        # Hatalı olan 'fromiso8601' yerine 'fromisoformat' kullanıyoruz
+        clean_time = request.prediction_time.replace("Z", "")
+        target_time = datetime.fromisoformat(clean_time)
+        
         ratio = await calculate_occupancy_ratio(request.park_id, target_time)
-        return {"park_id": request.park_id, "predicted_occupancy_ratio": round(ratio, 2)}
+        return {
+            "park_id": request.park_id, 
+            "predicted_occupancy_ratio": round(ratio, 2)
+        }
     except Exception as e:
-        raise HTTPException(status_code=400, detail=str(e))
+        # Hatanın ne olduğunu terminalde görmek için print kalsın
+        print(f"❌ Tahmin Hatası Detayı: {e}")
+        raise HTTPException(status_code=400, detail=f"Geçersiz tarih formatı: {str(e)}")
 
 @app.post("/recommend")
 async def get_recommendation(request: RecommendationRequest):
