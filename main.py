@@ -4,6 +4,7 @@ import pandas as pd
 import joblib
 import firebase_admin
 import numpy as np
+import warnings
 from datetime import datetime, timedelta
 from math import radians, cos, sin, asin, sqrt
 from fastapi import FastAPI, HTTPException
@@ -13,7 +14,8 @@ from firebase_admin import credentials, firestore
 from contextlib import asynccontextmanager
 from dotenv import load_dotenv
 
-# .env dosyasındaki değişkenleri yükle
+# Uyarıları ve Pandas uyarısını gizle
+warnings.filterwarnings('ignore')
 load_dotenv()
 
 # Global Değişkenler
@@ -47,23 +49,30 @@ def haversine_distance(lat1, lon1, lat2, lon2):
     return R * 2 * asin(sqrt(a))
 
 async def calculate_occupancy_ratio(park_id: str, target_time: datetime):
-    """Modeli kullanarak doluluk tahmini yapar."""
+    """Modeli kullanarak 30 dakikalık hassasiyetle doluluk tahmini yapar."""
     park_info = PARK_MAP.get(park_id)
     if not park_info or model is None or scaler is None: 
-        return 0.5 # Bilgi yoksa %50 döndür (Sistem çökmesin)
+        return 0.5 
     
     try:
         hour = target_time.hour
+        minute = target_time.minute
         dayofweek = target_time.weekday()
         is_weekend = 1 if dayofweek >= 5 else 0
         
-        # Veri tipi dönüşümleri (Firestore güvenliği)
         park_id_encoded = int(park_info.get("encoded_id", 0))
         capacity = int(park_info.get("capacity", 50))
 
-        # Model girdisi
+        # 🔥 KRİTİK: Eğitimdeki FEATURES sırası tam olarak bu olmalı
+        FEATURES = [
+            "hour", "minute", "dayofweek", "is_weekend", "is_holiday", 
+            "park_id_encoded", "max_capacity", "temperature", "precipitation", 
+            "wind_speed", "pressure"
+        ]
+        
         input_data = {
             "hour": hour,
+            "minute": minute,
             "dayofweek": dayofweek,
             "is_weekend": is_weekend,
             "is_holiday": 0,
@@ -75,35 +84,32 @@ async def calculate_occupancy_ratio(park_id: str, target_time: datetime):
             "pressure": 1013.0
         }
         
-        df_input = pd.DataFrame([input_data])
-        scale_cols = ["hour", "max_capacity", "temperature", "precipitation", "wind_speed", "pressure"]
+        # DataFrame oluştur ve sütun sırasını FEATURES listesine göre sabitle
+        df_input = pd.DataFrame([input_data])[FEATURES]
         
-        # Ölçeklendirme
-        df_input[scale_cols] = scaler.transform(df_input[scale_cols])
+        # 🔥 HATA ÇÖZÜMÜ: Scaler'a sadece scale_cols değil, TÜM sütunları gönderiyoruz.
+        # Çünkü scaler fit edilirken tüm özellikleri gördü.
+        df_input_scaled = pd.DataFrame(scaler.transform(df_input), columns=FEATURES)
 
-        # Tahmin Özellikleri
-        FEATURES = ["hour", "dayofweek", "is_weekend", "is_holiday", "park_id_encoded", 
-                    "max_capacity", "temperature", "precipitation", "wind_speed", "pressure"]
-        
-        prediction = model.predict(df_input[FEATURES])
+        # Tahmin
+        prediction = model.predict(df_input_scaled)
         base_ratio = float(prediction[0])
 
-        # 🚀 ZAMANSAL SALINIM (Kullanıcı etkileşimi için)
+        # Yoğunluk saatlerine göre küçük düzeltme
         time_factor = 0.0
-        if 8 <= hour <= 10: time_factor = 0.07   # Sabah yoğunluğu
-        elif 12 <= hour <= 14: time_factor = 0.12 # Öğle yoğunluğu
-        elif 17 <= hour <= 19: time_factor = 0.18 # Akşam zirve
-        elif 22 <= hour <= 23 or 0 <= hour <= 6: time_factor = -0.25 # Gece boşalması
+        if 8 <= hour <= 10: time_factor = 0.05
+        elif 17 <= hour <= 19: time_factor = 0.10
 
         final_ratio = max(0.05, min(0.98, base_ratio + time_factor))
         return final_ratio
+
     except Exception as e:
         print(f"❌ Tahmin hatası ({park_id}): {e}")
         return 0.5
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    """Uygulama başlarken modelleri ve veritabanını yükler."""
+    """Uygulama başlarken yeni 30dk modellerini yükler."""
     global model, scaler, DB, PARK_MAP
     try:
         if not firebase_admin._apps:
@@ -111,7 +117,6 @@ async def lifespan(app: FastAPI):
             firebase_admin.initialize_app(cred)
         
         DB = firestore.client()
-        # Firestore'daki otoparkları belleğe al (Hız için)
         docs = DB.collection("otoparklar").stream()
         for doc in docs:
             data = doc.to_dict()
@@ -122,10 +127,10 @@ async def lifespan(app: FastAPI):
                 "longitude": data.get("longitude"),
             }
         
-        # Model ve Scaler dosyalarını yükle
+        # 🔥 Yeni 30 dk'lık dosyaları yükle
         model = joblib.load("retrained_occupancy_model.joblib")
         scaler = joblib.load("retrained_standard_scaler.joblib")
-        print(f"✅ Sistem Hazır: {len(PARK_MAP)} otopark yüklendi.")
+        print(f"✅ 30 DK Modeli Hazır: {len(PARK_MAP)} otopark yüklendi.")
     except Exception as e: 
         print(f"❌ Başlatma Hatası: {e}")
     yield
@@ -135,7 +140,7 @@ app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], all
 
 @app.post("/predict")
 async def predict_occupancy(request: PredictionRequest):
-    """Tekil bir otopark için tahmin döndürür."""
+    """Tekil otopark için 30 dk hassasiyetli tahmin."""
     try:
         clean_time = request.prediction_time.replace("Z", "").split(".")[0]
         target_time = datetime.fromisoformat(clean_time)
@@ -146,14 +151,11 @@ async def predict_occupancy(request: PredictionRequest):
 
 @app.post("/recommend")
 async def get_recommendation(request: RecommendationRequest):
-    """Fatura dostu akıllı otopark önerisi yapar (Debug Modu Aktif)."""
-    
-    # 1. ADIM: KUŞ UÇUŞU FİLTRELEME (Bedava)
+    """Öneride de 30 dk hassasiyetli varış tahmini kullanılır."""
     MAX_RADIUS_KM = 2.0 
     filtered_parks = []
     for p_id, info in PARK_MAP.items():
         if info.get('latitude') is None: continue
-        
         air_dist = haversine_distance(request.target_lat, request.target_lon, info['latitude'], info['longitude'])
         if air_dist <= MAX_RADIUS_KM: 
             filtered_parks.append((p_id, info))
@@ -166,13 +168,10 @@ async def get_recommendation(request: RecommendationRequest):
     if not filtered_parks:
         raise HTTPException(status_code=404, detail="Yakınlarda otopark bulunamadı.")
 
-    # 2. ADIM: EN YAKIN 5 TANEYİ SEÇ
     filtered_parks.sort(key=lambda x: haversine_distance(request.target_lat, request.target_lon, x[1]['latitude'], x[1]['longitude']))
     limited_parks = filtered_parks[:5] 
-
     dest_str = "|".join([f"{p[1]['latitude']},{p[1]['longitude']}" for p in limited_parks])
     
-    # URL Oluşturma
     dist_url = (f"https://maps.googleapis.com/maps/api/distancematrix/json?"
                 f"origins={request.user_lat},{request.user_lon}&"
                 f"destinations={dest_str}&mode=driving&key={GOOGLE_MAPS_API_KEY}")
@@ -182,31 +181,12 @@ async def get_recommendation(request: RecommendationRequest):
                 f"destinations={request.target_lat},{request.target_lon}&"
                 f"mode=walking&key={GOOGLE_MAPS_API_KEY}")
 
-    # 🔍 DEBUG: İSTEKLERİ TERMİNALE BAS
-    print("\n--- GOOGLE API DEBUG BAŞLADI ---")
-    print(f"📡 Driving API URL: {dist_url}")
-    print(f"📡 Walking API URL: {walk_url}")
-
     try:
-        d_res_raw = requests.get(dist_url)
-        w_res_raw = requests.get(walk_url)
-        
-        d_res = d_res_raw.json()
-        w_res = w_res_raw.json()
-
-        # 🔍 DEBUG: GOOGLE YANITLARINI GÖR
-        print(f"📦 Driving Response Status: {d_res.get('status')}")
-        if d_res.get('status') != 'OK':
-            print(f"❌ Driving Error Detail: {d_res.get('error_message', 'No extra message')}")
-
-        print(f"📦 Walking Response Status: {w_res.get('status')}")
-        if w_res.get('status') != 'OK':
-            print(f"❌ Walking Error Detail: {w_res.get('error_message', 'No extra message')}")
-        print("--- DEBUG BİTTİ ---\n")
+        d_res = requests.get(dist_url).json()
+        w_res = requests.get(walk_url).json()
 
         if d_res.get('status') != 'OK' or w_res.get('status') != 'OK':
-            google_error = d_res.get('error_message') or w_res.get('error_message') or "Bilinmeyen API Hatası"
-            raise HTTPException(status_code=502, detail=f"Google API Hatası: {google_error}")
+            raise HTTPException(status_code=502, detail="Google API Hatası")
 
         results = []
         for i, (park_id, info) in enumerate(limited_parks):
@@ -219,6 +199,7 @@ async def get_recommendation(request: RecommendationRequest):
                     walk_min = w_elem['duration']['value'] / 60
                     
                     arrival_time = datetime.now() + timedelta(minutes=dur_min)
+                    # Buradaki tahmin artık 30 dk hassasiyetli
                     occ_ratio = await calculate_occupancy_ratio(park_id, arrival_time)
 
                     score = (walk_min * 3.0) + (dur_min * 0.8) + (occ_ratio * 20)
@@ -234,20 +215,11 @@ async def get_recommendation(request: RecommendationRequest):
                         "walk_min": round(walk_min),
                         "score": score
                     })
-            except Exception as e: 
-                print(f"⚠️ Element ayrıştırma hatası: {e}")
-                continue
-
-        if not results:
-            raise HTTPException(status_code=404, detail="Uygulun rota bulunamadı.")
+            except: continue
 
         results.sort(key=lambda x: x['score'])
         return {"recommended_parking": results[0], "all_parkings": results}
-
-    except HTTPException as he:
-        raise he
     except Exception as e:
-        print(f"🔥 Kritik Hata: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
 if __name__ == "__main__":

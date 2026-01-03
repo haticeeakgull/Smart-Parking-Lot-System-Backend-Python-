@@ -1,3 +1,4 @@
 .venv
 venv
 firebase_admin_key.json
+retrained_occupancy_model.joblib
