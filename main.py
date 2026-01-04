@@ -148,6 +148,36 @@ async def predict_occupancy(request: PredictionRequest):
         return {"park_id": request.park_id, "predicted_occupancy_ratio": round(ratio, 2)}
     except Exception as e:
         raise HTTPException(status_code=400, detail=str(e))
+@app.get("/occupancy-graph/{park_id}")
+async def get_occupancy_graph(park_id: str):
+    """
+    Seçilen otopark için önümüzdeki 24 saatin 
+    doluluk tahminlerini (grafik için) döndürür.
+    """
+    if park_id not in PARK_MAP:
+        raise HTTPException(status_code=404, detail="Otopark bulunamadı.")
+
+    graph_data = []
+    now = datetime.now()
+
+    try:
+        # Önümüzdeki 24 saat için her 1 saatlik dilim için tahmin üret
+        for i in range(24):
+            target_time = now + timedelta(hours=i)
+            
+            # Mevcut calculate_occupancy_ratio fonksiyonunuzu kullanıyoruz
+            ratio = await calculate_occupancy_ratio(park_id, target_time)
+            
+            graph_data.append({
+                "time": target_time.strftime("%H:00"),
+                "ratio": round(ratio, 2)
+            })
+
+        return {"park_id": park_id, "data": graph_data}
+    
+    except Exception as e:
+        print(f"❌ Grafik oluşturma hatası: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
 
 @app.post("/recommend")
 async def get_recommendation(request: RecommendationRequest):

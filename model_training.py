@@ -85,11 +85,19 @@ X_train = scaler.fit_transform(X_train)
 X_test = scaler.transform(X_test)
 
 print(f"\n🚀 Model Eğitiliyor (30 dk Hassasiyetle - Kayıt Sayısı: {len(X)})...")
+<<<<<<< HEAD
 model = RandomForestRegressor(n_estimators=100, random_state=42, n_jobs=-1)
 model.fit(X_train, y_train)
 
 # --- 5. KAYDETME ---
 joblib.dump(model, 'retrained_occupancy_model.joblib')
+=======
+model = RandomForestRegressor(n_estimators=100, min_samples_leaf=3, max_depth=50,random_state=42, n_jobs=-1)
+model.fit(X_train, y_train)
+
+# --- 5. KAYDETME ---
+joblib.dump(model, 'retrained_occupancy_model.joblib',compress=3)
+>>>>>>> 4aeaf2f (Save my local progress)
 joblib.dump(scaler, 'retrained_standard_scaler.joblib')
 joblib.dump(le, 'park_label_encoder.joblib')
 
